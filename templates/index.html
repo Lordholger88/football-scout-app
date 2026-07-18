@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Scout Index — Market Value Terminal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<style>
+  :root{
+    --ink:#0B0D10; --panel:#13171C; --panel2:#1B2029;
+    --line:rgba(255,255,255,0.08); --line-strong:rgba(255,255,255,0.16);
+    --chalk:#ECEFF3; --steel:#8B93A1; --steel-dim:#5B6270;
+    --amber:#FFB43C; --turf:#5FAE7C; --turf-dim:#2E4B39; --drop:#FF6E62;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:var(--ink);color:var(--chalk);font-family:'Inter',sans-serif;}
+  h1,h2,h3{font-family:'Oswald',sans-serif;margin:0;}
+  .mono{font-family:'JetBrains Mono',monospace;}
+  a{color:inherit;}
+
+  header.hero{max-width:1180px;margin:0 auto;padding:56px 24px 36px;}
+  .eyebrow{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--amber);letter-spacing:0.14em;text-transform:uppercase;margin-bottom:16px;display:flex;align-items:center;gap:10px;}
+  .eyebrow::before{content:'';width:7px;height:7px;border-radius:50%;background:var(--turf);box-shadow:0 0 0 3px var(--turf-dim);}
+  h1.title{font-size:clamp(36px,6vw,60px);font-weight:600;line-height:0.98;text-transform:uppercase;}
+  h1.title em{font-style:normal;color:var(--amber);}
+  .sub{max-width:600px;color:var(--steel);font-size:15px;line-height:1.6;margin-top:16px;}
+  .stat-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);margin-top:32px;}
+  .stat-cell{background:var(--ink);padding:16px 18px;}
+  .stat-cell .num{font-family:'JetBrains Mono',monospace;font-size:24px;font-weight:700;}
+  .stat-cell .lab{font-size:11px;color:var(--steel-dim);text-transform:uppercase;letter-spacing:0.08em;margin-top:4px;}
+
+  .controls{max-width:1180px;margin:0 auto;padding:16px 24px 24px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;position:sticky;top:0;background:linear-gradient(var(--ink) 80%, transparent);z-index:5;}
+  .search-box{flex:1 1 320px;position:relative;}
+  .search-box input{width:100%;background:var(--panel);border:1px solid var(--line-strong);color:var(--chalk);font-family:'JetBrains Mono',monospace;font-size:14px;padding:13px 14px 13px 38px;border-radius:2px;outline:none;}
+  .search-box input:focus{border-color:var(--amber);}
+  .search-icon{position:absolute;left:13px;top:50%;transform:translateY(-50%);color:var(--steel-dim);}
+  select{background:var(--panel);border:1px solid var(--line-strong);color:var(--chalk);font-family:'JetBrains Mono',monospace;font-size:13px;padding:12px;border-radius:2px;outline:none;cursor:pointer;}
+  .result-count{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--steel-dim);white-space:nowrap;}
+
+  main{max-width:1180px;margin:0 auto;padding:0 24px 40px;}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);}
+  .card{background:var(--ink);padding:18px;cursor:pointer;transition:background 0.15s ease;}
+  .card:hover{background:var(--panel);}
+  .card .rank{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--steel-dim);}
+  .card h3{font-size:18px;margin-top:8px;text-transform:uppercase;line-height:1.15;}
+  .card .pos{color:var(--steel);font-size:12px;margin-top:4px;}
+  .card .club{color:var(--steel-dim);font-size:12px;margin-top:2px;}
+  .card .val{margin-top:14px;font-family:'JetBrains Mono',monospace;font-size:22px;font-weight:700;color:var(--amber);}
+  .card .val span{font-size:12px;color:var(--steel-dim);margin-left:4px;}
+  .loadmore{grid-column:1/-1;text-align:center;padding:20px;}
+  .loadmore button{background:var(--panel2);border:1px solid var(--line-strong);color:var(--chalk);font-family:'JetBrains Mono',monospace;padding:12px 24px;cursor:pointer;}
+  .loadmore button:hover{border-color:var(--amber);}
+  .empty{grid-column:1/-1;padding:60px 20px;text-align:center;color:var(--steel-dim);font-family:'JetBrains Mono',monospace;font-size:13px;}
+
+  .overlay{position:fixed;inset:0;background:rgba(6,7,9,0.85);display:none;align-items:flex-start;justify-content:center;z-index:50;padding:40px 20px;overflow-y:auto;}
+  .overlay.show{display:flex;}
+  .modal{background:var(--panel);border:1px solid var(--line-strong);max-width:640px;width:100%;padding:32px;position:relative;}
+  .modal-close{position:absolute;top:16px;right:16px;background:none;border:none;color:var(--steel);font-size:22px;cursor:pointer;}
+  .modal-close:hover{color:var(--chalk);}
+  .modal h2{font-size:30px;text-transform:uppercase;margin-top:8px;}
+  .modal .modal-sub{color:var(--steel);font-size:14px;margin-top:4px;}
+  .modal-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:1px;background:var(--line);border:1px solid var(--line);margin-top:20px;}
+  .modal-grid .mcell{background:var(--panel2);padding:12px 14px;}
+  .modal-grid .mcell .lab{font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--steel-dim);}
+  .modal-grid .mcell .v{font-family:'JetBrains Mono',monospace;font-size:14px;margin-top:3px;}
+  .chart-wrap{margin-top:24px;background:var(--panel2);border:1px solid var(--line);padding:16px;height:220px;}
+  .section-lab{font-family:'JetBrains Mono',monospace;font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--steel-dim);margin-top:24px;margin-bottom:10px;}
+  .transfer-row{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line);font-size:13px;}
+  .transfer-row .tdate{font-family:'JetBrains Mono',monospace;color:var(--steel-dim);min-width:80px;}
+  .transfer-row .tclubs{flex:1;}
+  .transfer-row .tfee{font-family:'JetBrains Mono',monospace;color:var(--amber);white-space:nowrap;}
+  .loading-inline{color:var(--steel-dim);font-family:'JetBrains Mono',monospace;font-size:12px;}
+
+  footer{max-width:1180px;margin:0 auto;padding:0 24px 60px;color:var(--steel-dim);font-size:12px;font-family:'JetBrains Mono',monospace;border-top:1px solid var(--line);padding-top:24px;line-height:1.7;}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="eyebrow">Live local database · full transfermarkt-datasets snapshot</div>
+  <h1 class="title">Scout <em>Index</em></h1>
+  <p class="sub">Search any player in the dataset. Click through for market value history, career transfers, and profile detail — all served from a local database on your machine.</p>
+  <div class="stat-row" id="statRow"><div class="stat-cell"><div class="num">…</div><div class="lab">loading</div></div></div>
+</header>
+
+<div class="controls">
+  <div class="search-box">
+    <span class="search-icon">⌕</span>
+    <input type="text" id="searchInput" placeholder="Search a player, club, or nationality...">
+  </div>
+  <select id="posFilter"><option value="">All positions</option></select>
+  <select id="natFilter"><option value="">All nationalities</option></select>
+  <select id="sortSel">
+    <option value="value_desc">Sort: Value ↓</option>
+    <option value="value_asc">Sort: Value ↑</option>
+    <option value="name">Sort: Name A–Z</option>
+    <option value="age_asc">Sort: Youngest</option>
+    <option value="age_desc">Sort: Oldest</option>
+  </select>
+  <div class="result-count" id="resultCount"></div>
+</div>
+
+<main>
+  <div class="grid" id="grid"></div>
+</main>
+
+<footer>
+  DATA — served from a local copy of the open <b>transfermarkt-datasets</b> project (github.com/dcaribou/transfermarkt-datasets),
+  which extracts and republishes Transfermarkt data on a weekly cadence. All values, ages, and transfer records come directly
+  from that dataset; this app adds no data of its own. Run locally — nothing is sent to any server except the one-time
+  download of the dataset files.
+</footer>
+
+<div class="overlay" id="overlay">
+  <div class="modal">
+    <button class="modal-close" id="modalClose">&times;</button>
+    <div id="modalBody"><span class="loading-inline">Loading player…</span></div>
+  </div>
+</div>
+
+<script>
+const grid = document.getElementById('grid');
+const searchInput = document.getElementById('searchInput');
+const posFilter = document.getElementById('posFilter');
+const natFilter = document.getElementById('natFilter');
+const sortSel = document.getElementById('sortSel');
+const resultCount = document.getElementById('resultCount');
+let offset = 0;
+const PAGE_SIZE = 60;
+let currentTotal = 0;
+
+function fmtVal(v){
+  if(v == null) return '—';
+  return '€' + (v/1_000_000).toFixed(v >= 10_000_000 ? 0 : 1) + 'm';
+}
+function ageFromDOB(dob){
+  if(!dob) return '—';
+  const b = new Date(dob);
+  const now = new Date();
+  let age = now.getFullYear() - b.getFullYear();
+  const m = now.getMonth() - b.getMonth();
+  if(m < 0 || (m===0 && now.getDate() < b.getDate())) age--;
+  return age;
+}
+
+async function loadFilters(){
+  const res = await fetch('/api/filters');
+  const data = await res.json();
+  data.positions.forEach(p=>{
+    const o = document.createElement('option'); o.value = p; o.textContent = p;
+    posFilter.appendChild(o);
+  });
+  data.nationalities.forEach(n=>{
+    const o = document.createElement('option'); o.value = n; o.textContent = n;
+    natFilter.appendChild(o);
+  });
+}
+
+async function loadStats(){
+  const res = await fetch('/api/stats');
+  const s = await res.json();
+  document.getElementById('statRow').innerHTML = `
+    <div class="stat-cell"><div class="num">${s.total_players.toLocaleString()}</div><div class="lab">Players in database</div></div>
+    <div class="stat-cell"><div class="num">${s.valued_players.toLocaleString()}</div><div class="lab">With market value</div></div>
+    <div class="stat-cell"><div class="num">${s.total_nationalities}</div><div class="lab">Nationalities</div></div>
+    <div class="stat-cell"><div class="num">${s.france_count}</div><div class="lab">From France</div></div>
+  `;
+}
+
+async function search(reset=true){
+  if(reset){ offset = 0; grid.innerHTML = ''; }
+  const params = new URLSearchParams({
+    q: searchInput.value.trim(),
+    position: posFilter.value,
+    nationality: natFilter.value,
+    sort: sortSel.value,
+    limit: PAGE_SIZE,
+    offset: offset
+  });
+  const res = await fetch('/api/players?' + params.toString());
+  const data = await res.json();
+  currentTotal = data.total;
+  resultCount.textContent = `${data.total.toLocaleString()} players match`;
+
+  const existingLoadmore = grid.querySelector('.loadmore');
+  if(existingLoadmore) existingLoadmore.remove();
+
+  if(data.results.length===0 && offset===0){
+    grid.innerHTML = '<div class="empty">No players match that search.</div>';
+    return;
+  }
+
+  data.results.forEach(p=>{
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = `
+      <span class="rank mono">${p.sub_position || p.position || ''}</span>
+      <h3>${p.name}</h3>
+      <div class="pos">${ageFromDOB(p.date_of_birth)} yrs · ${p.country_of_citizenship || '—'}</div>
+      <div class="club">${p.current_club_name || 'Free agent'}</div>
+      <div class="val">${fmtVal(p.market_value_in_eur)}<span>market value</span></div>
+    `;
+    card.addEventListener('click', ()=>openModal(p.player_id));
+    grid.appendChild(card);
+  });
+
+  offset += data.results.length;
+  if(offset < currentTotal){
+    const lm = document.createElement('div');
+    lm.className = 'loadmore';
+    lm.innerHTML = '<button id="loadMoreBtn">Load more players</button>';
+    grid.appendChild(lm);
+    document.getElementById('loadMoreBtn').addEventListener('click', ()=>search(false));
+  }
+}
+
+let searchTimeout;
+[searchInput].forEach(el=>el.addEventListener('input', ()=>{
+  clearTimeout(searchTimeout);
+  searchTimeout = setTimeout(()=>search(true), 300);
+}));
+[posFilter,natFilter,sortSel].forEach(el=>el.addEventListener('change', ()=>search(true)));
+
+const overlay = document.getElementById('overlay');
+const modalBody = document.getElementById('modalBody');
+let chartInstance = null;
+
+async function openModal(playerId){
+  overlay.classList.add('show');
+  modalBody.innerHTML = '<span class="loading-inline">Loading player…</span>';
+
+  const [pRes, vRes, tRes] = await Promise.all([
+    fetch(`/api/player/${playerId}`),
+    fetch(`/api/player/${playerId}/value-history`),
+    fetch(`/api/player/${playerId}/transfers`)
+  ]);
+  const p = await pRes.json();
+  const history = await vRes.json();
+  const transfers = await tRes.json();
+
+  modalBody.innerHTML = `
+    <div class="mono" style="color:var(--amber);font-size:13px;">${p.position || ''} ${p.sub_position ? '· ' + p.sub_position : ''}</div>
+    <h2>${p.name}</h2>
+    <div class="modal-sub">${p.current_club_name || 'Free agent'}</div>
+    <div class="modal-grid">
+      <div class="mcell"><div class="lab">Age</div><div class="v">${ageFromDOB(p.date_of_birth)} (${p.date_of_birth || '—'})</div></div>
+      <div class="mcell"><div class="lab">Nationality</div><div class="v">${p.country_of_citizenship || '—'}</div></div>
+      <div class="mcell"><div class="lab">Height</div><div class="v">${p.height_in_cm ? p.height_in_cm + ' cm' : '—'}</div></div>
+      <div class="mcell"><div class="lab">Foot</div><div class="v">${p.foot || '—'}</div></div>
+      <div class="mcell"><div class="lab">Current value</div><div class="v" style="color:var(--amber)">${fmtVal(p.market_value_in_eur)}</div></div>
+      <div class="mcell"><div class="lab">Peak value</div><div class="v">${fmtVal(p.highest_market_value_in_eur)}</div></div>
+      <div class="mcell"><div class="lab">Contract until</div><div class="v">${p.contract_expiration_date || '—'}</div></div>
+      <div class="mcell"><div class="lab">Agent</div><div class="v">${p.agent_name || '—'}</div></div>
+    </div>
+    <div class="section-lab">Market value history</div>
+    <div class="chart-wrap"><canvas id="valueChart"></canvas></div>
+    <div class="section-lab">Transfer history</div>
+    <div id="transferList"></div>
+  `;
+
+  const transferList = document.getElementById('transferList');
+  if(transfers.length===0){
+    transferList.innerHTML = '<div class="loading-inline">No recorded transfers.</div>';
+  } else {
+    transferList.innerHTML = transfers.map(t => `
+      <div class="transfer-row">
+        <div class="tdate mono">${t.date}</div>
+        <div class="tclubs">${t.from_club || '—'} → ${t.to_club || '—'}</div>
+        <div class="tfee">${t.fee ? fmtVal(t.fee) : (t.fee === 0 ? 'Free' : '—')}</div>
+      </div>
+    `).join('');
+  }
+
+  if(chartInstance) chartInstance.destroy();
+  const ctx = document.getElementById('valueChart');
+  chartInstance = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: history.map(h=>h.date),
+      datasets: [{
+        data: history.map(h=>h.value/1_000_000),
+        borderColor: '#FFB43C',
+        backgroundColor: 'rgba(255,180,60,0.08)',
+        fill: true,
+        tension: 0.25,
+        pointRadius: 0,
+        borderWidth: 2
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display:false } },
+      scales: {
+        x: { ticks:{ color:'#5B6270', maxTicksLimit:6, font:{family:'JetBrains Mono',size:10} }, grid:{ color:'rgba(255,255,255,0.05)' } },
+        y: { ticks:{ color:'#5B6270', callback:(v)=>'€'+v+'m', font:{family:'JetBrains Mono',size:10} }, grid:{ color:'rgba(255,255,255,0.05)' } }
+      }
+    }
+  });
+}
+
+document.getElementById('modalClose').addEventListener('click', ()=>overlay.classList.remove('show'));
+overlay.addEventListener('click', (e)=>{ if(e.target===overlay) overlay.classList.remove('show'); });
+
+loadFilters();
+loadStats();
+search(true);
+</script>
+</body>
+</html>
