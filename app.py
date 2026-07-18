@@ -81,7 +81,7 @@ else:
                 print("dataset's hosting may have moved — check https://github.com/dcaribou/transfermarkt-datasets")
                 sys.exit(1)
 
-        download_if_missing()
+    download_if_missing()
     print("Loading data into DuckDB (this takes a few seconds)...")
     for fname in FILES:
         table = TABLE_NAMES[fname]
@@ -229,14 +229,6 @@ def player_transfers(player_id):
 def ask_ai():
     """
     Free-text Q&A over the player database, via Groq (free tier).
-
-    Instead of dumping hundreds/thousands of raw rows into the prompt (which is what
-    caused the 413 Payload Too Large — that was ~20k+ tokens of raw text on every
-    request), we precompute the aggregates that actually answer most questions
-    (counts by nationality/position/club, value totals, age stats) via SQL, and only
-    attach a short top-N list for "who specifically is #7" type lookups. This is both
-    smaller AND more accurate, since counting is done by SQL, not by the model eyeballing
-    a wall of text.
     """
     body = request.get_json(force=True, silent=True) or {}
     question = (body.get("question") or "").strip()
@@ -248,8 +240,8 @@ def ask_ai():
                      "(get a free key at console.groq.com/keys) and redeploy."
         })
 
-    TOP_N_LIST = 150          # small per-player list, for "who is..." style questions
-    MAX_DATASET_CHARS = 9000  # hard cap on the built context, ~2200-2500 tokens — safety net
+    TOP_N_LIST = 150          
+    MAX_DATASET_CHARS = 9000  
 
     valued_total = con.execute("SELECT COUNT(*) FROM players WHERE market_value_in_eur IS NOT NULL").fetchone()[0]
 
