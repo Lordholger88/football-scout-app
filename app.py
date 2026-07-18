@@ -48,11 +48,8 @@ else:
     import urllib.request
 
     print("No trimmed dataset found — falling back to full download mode.")
-    try:
-        FULL_DIR.mkdir(exist_ok=True)
-    except OSError:
-        pass
-        
+    print("(Run trimmer.py after this finishes to build a small, deployable dataset.)")
+    FULL_DIR.mkdir(exist_ok=True)
     BASE_URL = "https://pub-e682421888d945d684bcae8890b0ec20.r2.dev/data/"
 
     def download_if_missing():
@@ -75,33 +72,16 @@ else:
                 urllib.request.urlretrieve(url, dest, _progress)
                 print()
             except Exception as e:
-                raise Exception(f"Failed to download {dest.name}: {e}")
+                print(f"\nFailed to download {dest.name}: {e}")
+                print("Check your internet connection and try again. If this keeps failing, the")
+                print("dataset's hosting may have moved — check https://github.com/dcaribou/transfermarkt-datasets")
+                sys.exit(1)
 
-    try:
-        download_if_missing()
-        print("Loading data into DuckDB (this takes a few seconds)...")
-        for fname in FILES:
-            table = TABLE_NAMES[fname]
-            con.execute(f"CREATE TABLE {table} AS SELECT * FROM read_csv_auto('{FULL_DIR / (fname + '.csv.gz')}')")
-    except Exception as e:
-        print(f"\nData load failed: {e}")
-        print("Creating dummy tables to prevent Vercel from crashing...")
-        con.execute("""
-            CREATE TABLE players (
-                player_id BIGINT, name VARCHAR, current_club_name VARCHAR, country_of_citizenship VARCHAR,
-                position VARCHAR, sub_position VARCHAR, market_value_in_eur DOUBLE, highest_market_value_in_eur DOUBLE,
-                date_of_birth DATE, image_url VARCHAR, first_name VARCHAR, last_name VARCHAR, country_of_birth VARCHAR,
-                city_of_birth VARCHAR, foot VARCHAR, height_in_cm DOUBLE, agent_name VARCHAR, contract_expiration_date DATE,
-                url VARCHAR
-            )
-        """)
-        con.execute("CREATE TABLE valuations (player_id BIGINT, date DATE, market_value_in_eur DOUBLE)")
-        con.execute("CREATE TABLE transfers (player_id BIGINT, transfer_date DATE, transfer_season VARCHAR, from_club_name VARCHAR, to_club_name VARCHAR, transfer_fee DOUBLE, market_value_in_eur DOUBLE)")
-        con.execute("CREATE TABLE clubs (club_id BIGINT, name VARCHAR)")
-        
-        # Insert a warning row so the frontend doesn't break and shows the error directly
-        con.execute("INSERT INTO players (player_id, name, market_value_in_eur, position, current_club_name) VALUES (0, 'ERROR: data_trimmed folder missing from Vercel deployment', 999000000, 'Missing Data', 'Check GitHub Repo')")
-
+    download_if_missing()
+    print("Loading data into DuckDB (this takes a few seconds)...")
+    for fname in FILES:
+        table = TABLE_NAMES[fname]
+        con.execute(f"CREATE TABLE {table} AS SELECT * FROM read_csv_auto('{FULL_DIR / (fname + '.csv.gz')}')")
 
 player_count = con.execute("SELECT COUNT(*) FROM players").fetchone()[0]
 print(f"Loaded {player_count:,} players. Starting server...")
@@ -241,10 +221,73 @@ def player_transfers(player_id):
     } for r in rows])
 
 
+@app.route("/api/debug")
+def debug_info():
+    """
+    Self-serve diagnostic — hit this directly (e.g. https://yourapp.vercel.app/api/debug)
+    to see exactly what's loaded, with no guessing. Checks:
+      - which data mode loaded (trimmed vs full) and row counts per table
+      - the actual column TYPES DuckDB inferred for each id column (this is where a
+        BIGINT vs VARCHAR mismatch would show up)
+      - for the 5 most valuable players, how many value-history and transfer rows
+        actually join to them — if this is 0 across the board for the top 5,
+        the join is still broken; if it's >0, the pipeline is working and any
+        remaining "no data" you see for other players is a genuine gap in the
+        source dataset, not a bug.
+    """
+    info = {"data_mode": "trimmed" if trimmed_files_present else "full"}
+
+    for table in ["players", "valuations", "transfers", "clubs"]:
+        try:
+            count = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            schema = con.execute(f"DESCRIBE {table}").fetchall()
+            id_cols = [r for r in schema if "id" in r[0].lower()]
+            info[table] = {
+                "row_count": count,
+                "id_column_types": {r[0]: r[1] for r in id_cols},
+            }
+        except Exception as e:
+            info[table] = {"error": str(e)}
+
+    try:
+        sample = con.execute("""
+            SELECT p.player_id, p.name,
+                   (SELECT COUNT(*) FROM valuations v WHERE CAST(v.player_id AS BIGINT) = CAST(p.player_id AS BIGINT)) AS value_history_rows,
+                   (SELECT COUNT(*) FROM transfers t WHERE CAST(t.player_id AS BIGINT) = CAST(p.player_id AS BIGINT)) AS transfer_rows
+            FROM players p
+            WHERE p.market_value_in_eur IS NOT NULL
+            ORDER BY p.market_value_in_eur DESC
+            LIMIT 5
+        """).fetchall()
+        info["top5_join_check"] = [
+            {"player_id": r[0], "name": r[1], "value_history_rows": r[2], "transfer_rows": r[3]}
+            for r in sample
+        ]
+        info["diagnosis"] = (
+            "OK — top players have joined data, pipeline is working."
+            if sample and all(r[2] > 0 for r in sample)
+            else "BROKEN — top 5 most valuable players have zero value-history rows. "
+                 "This should never happen for real top players, so the join is still failing. "
+                 "Check id_column_types above for a type mismatch between tables."
+        )
+    except Exception as e:
+        info["top5_join_check_error"] = str(e)
+
+    return jsonify(info)
+
+
 @app.route("/api/ask", methods=["POST"])
 def ask_ai():
     """
     Free-text Q&A over the player database, via Groq (free tier).
+
+    Instead of dumping hundreds/thousands of raw rows into the prompt (which is what
+    caused the 413 Payload Too Large — that was ~20k+ tokens of raw text on every
+    request), we precompute the aggregates that actually answer most questions
+    (counts by nationality/position/club, value totals, age stats) via SQL, and only
+    attach a short top-N list for "who specifically is #7" type lookups. This is both
+    smaller AND more accurate, since counting is done by SQL, not by the model eyeballing
+    a wall of text.
     """
     body = request.get_json(force=True, silent=True) or {}
     question = (body.get("question") or "").strip()
@@ -254,10 +297,10 @@ def ask_ai():
         return jsonify({
             "error": "AI isn't configured on the server yet — set the GROQ_API_KEY environment variable "
                      "(get a free key at console.groq.com/keys) and redeploy."
-        })
+        }), 503
 
-    TOP_N_LIST = 150          
-    MAX_DATASET_CHARS = 9000  
+    TOP_N_LIST = 150          # small per-player list, for "who is..." style questions
+    MAX_DATASET_CHARS = 9000  # hard cap on the built context, ~2200-2500 tokens — safety net
 
     valued_total = con.execute("SELECT COUNT(*) FROM players WHERE market_value_in_eur IS NOT NULL").fetchone()[0]
 
@@ -282,14 +325,13 @@ def ask_ai():
         GROUP BY 1 ORDER BY c DESC LIMIT 20
     """).fetchall()
 
-    top10_sum_row = con.execute("""
+    top10_sum, = con.execute("""
         SELECT SUM(market_value_in_eur) FROM (
             SELECT market_value_in_eur FROM players
             WHERE market_value_in_eur IS NOT NULL
             ORDER BY market_value_in_eur DESC LIMIT 10
         )
     """).fetchone()
-    top10_sum = top10_sum_row[0] if top10_sum_row else 0
 
     over_100m_count, over_100m_avg_age = con.execute("""
         SELECT COUNT(*), AVG(DATE_DIFF('year', date_of_birth, CURRENT_DATE))
@@ -316,7 +358,7 @@ def ask_ai():
     parts = [
         f"TOTAL PLAYERS WITH A MARKET VALUE: {valued_total}",
         f"TOP 10 COMBINED MARKET VALUE: €{(top10_sum or 0)/1_000_000:.0f}m",
-        f"PLAYERS VALUED AT €100M OR MORE: count={over_100m_count}, average age={over_100m_avg_age or 0:.1f}" if over_100m_count else "PLAYERS VALUED AT €100M OR MORE: count=0",
+        f"PLAYERS VALUED AT €100M OR MORE: count={over_100m_count}, average age={over_100m_avg_age:.1f}" if over_100m_count else "PLAYERS VALUED AT €100M OR MORE: count=0",
         "",
         "PLAYER COUNT BY NATIONALITY (top 40 nationalities among valued players):",
         ", ".join(f"{n}: {c}" for n, c in nat_counts),
