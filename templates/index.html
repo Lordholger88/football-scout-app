@@ -278,14 +278,27 @@ async function openModal(playerId){
   overlay.classList.add('show');
   modalBody.innerHTML = '<span class="loading-inline">Loading player…</span>';
 
-  const [pRes, vRes, tRes] = await Promise.all([
-    fetch(`/api/player/${playerId}`),
-    fetch(`/api/player/${playerId}/value-history`),
-    fetch(`/api/player/${playerId}/transfers`)
-  ]);
-  const p = await pRes.json();
-  const history = await vRes.json();
-  const transfers = await tRes.json();
+  let p, history, transfers;
+  try {
+    const [pRes, vRes, tRes] = await Promise.all([
+      fetch(`/api/player/${playerId}`),
+      fetch(`/api/player/${playerId}/value-history`),
+      fetch(`/api/player/${playerId}/transfers`)
+    ]);
+    if(!pRes.ok){
+      modalBody.innerHTML = `<span class="ai-error">Couldn't load this player (HTTP ${pRes.status}). Check the server logs.</span>`;
+      return;
+    }
+    p = await pRes.json();
+    history = vRes.ok ? await vRes.json() : [];
+    transfers = tRes.ok ? await tRes.json() : [];
+    if(!vRes.ok) console.error('value-history request failed:', vRes.status);
+    if(!tRes.ok) console.error('transfers request failed:', tRes.status);
+  } catch (err) {
+    modalBody.innerHTML = '<span class="ai-error">Could not reach the server. Is the app running?</span>';
+    console.error(err);
+    return;
+  }
 
   modalBody.innerHTML = `
     <div class="mono" style="color:var(--amber);font-size:13px;">${p.position || ''} ${p.sub_position ? '· ' + p.sub_position : ''}</div>
@@ -302,14 +315,16 @@ async function openModal(playerId){
       <div class="mcell"><div class="lab">Agent</div><div class="v">${p.agent_name || '—'}</div></div>
     </div>
     <div class="section-lab">Market value history</div>
-    <div class="chart-wrap"><canvas id="valueChart"></canvas></div>
+    <div id="chartArea"></div>
     <div class="section-lab">Transfer history</div>
     <div id="transferList"></div>
   `;
 
+  const chartArea = document.getElementById('chartArea');
   const transferList = document.getElementById('transferList');
+
   if(transfers.length===0){
-    transferList.innerHTML = '<div class="loading-inline">No recorded transfers.</div>';
+    transferList.innerHTML = '<div class="loading-inline">No recorded transfers for this player in the dataset.</div>';
   } else {
     transferList.innerHTML = transfers.map(t => `
       <div class="transfer-row">
@@ -320,31 +335,37 @@ async function openModal(playerId){
     `).join('');
   }
 
-  if(chartInstance) chartInstance.destroy();
-  const ctx = document.getElementById('valueChart');
-  chartInstance = new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels: history.map(h=>h.date),
-      datasets: [{
-        data: history.map(h=>h.value/1_000_000),
-        borderColor: '#FFB43C',
-        backgroundColor: 'rgba(255,180,60,0.08)',
-        fill: true,
-        tension: 0.25,
-        pointRadius: 0,
-        borderWidth: 2
-      }]
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { display:false } },
-      scales: {
-        x: { ticks:{ color:'#5B6270', maxTicksLimit:6, font:{family:'JetBrains Mono',size:10} }, grid:{ color:'rgba(255,255,255,0.05)' } },
-        y: { ticks:{ color:'#5B6270', callback:(v)=>'€'+v+'m', font:{family:'JetBrains Mono',size:10} }, grid:{ color:'rgba(255,255,255,0.05)' } }
+  if(chartInstance){ chartInstance.destroy(); chartInstance = null; }
+
+  if(history.length === 0){
+    chartArea.innerHTML = '<div class="loading-inline" style="padding:20px 0;">No value history recorded for this player.</div>';
+  } else {
+    chartArea.innerHTML = '<div class="chart-wrap"><canvas id="valueChart"></canvas></div>';
+    const ctx = document.getElementById('valueChart');
+    chartInstance = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: history.map(h=>h.date),
+        datasets: [{
+          data: history.map(h=>h.value/1_000_000),
+          borderColor: '#FFB43C',
+          backgroundColor: 'rgba(255,180,60,0.08)',
+          fill: true,
+          tension: 0.25,
+          pointRadius: 0,
+          borderWidth: 2
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display:false } },
+        scales: {
+          x: { ticks:{ color:'#5B6270', maxTicksLimit:6, font:{family:'JetBrains Mono',size:10} }, grid:{ color:'rgba(255,255,255,0.05)' } },
+          y: { ticks:{ color:'#5B6270', callback:(v)=>'€'+v+'m', font:{family:'JetBrains Mono',size:10} }, grid:{ color:'rgba(255,255,255,0.05)' } }
+        }
       }
-    }
-  });
+    });
+  }
 }
 
 document.getElementById('modalClose').addEventListener('click', ()=>overlay.classList.remove('show'));
