@@ -1,81 +1,88 @@
 """
-Scout Index — local app server
---------------------------------
+Scout Index — app server
+--------------------------
 Serves a REST API + dark-themed frontend over the real, open
 "transfermarkt-datasets" project (https://github.com/dcaribou/transfermarkt-datasets),
 which legitimately scrapes and republishes Transfermarkt data on a weekly cadence.
 
-On first run this script downloads four CSV files (players, market value
-history, transfers, clubs) from that project's public data bucket into
-./data/, then loads them into an in-memory DuckDB and serves everything
-from http://localhost:5000.
+Two data modes, auto-detected at startup:
 
-No API key. No cost. Runs entirely on your machine after the first download.
+  1. TRIMMED (Vercel-friendly): if ./data_trimmed/*.parquet exists (built with
+     trimmer.py), those files are loaded directly. No network call, no download —
+     safe for serverless cold starts. This is what you deploy.
+
+  2. FULL (local dev): otherwise, downloads the full dataset (players, market
+     value history, transfers, clubs) into ./data/ on first run, same as before.
+     Use this locally to build the trimmed dataset via trimmer.py.
 """
 
 import os
-import sys
-import urllib.request
+from datetime import date
 from pathlib import Path
 
 import duckdb
+import requests
 from flask import Flask, jsonify, request, render_template
 
-DATA_DIR = Path(__file__).parent / "data"
-DATA_DIR.mkdir(exist_ok=True)
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
-BASE_URL = "https://pub-e682421888d945d684bcae8890b0ec20.r2.dev/data/"
-FILES = ["players.csv.gz", "player_valuations.csv.gz", "transfers.csv.gz", "clubs.csv.gz"]
+ROOT = Path(__file__).parent
+TRIMMED_DIR = ROOT / "data_trimmed"
+FULL_DIR = ROOT / "data"
 
+FILES = ["players", "player_valuations", "transfers", "clubs"]
+TABLE_NAMES = {"players": "players", "player_valuations": "valuations", "transfers": "transfers", "clubs": "clubs"}
 
-def download_if_missing():
-    for fname in FILES:
-        dest = DATA_DIR / fname
-        if dest.exists() and dest.stat().st_size > 0:
-            continue
-        url = BASE_URL + fname
-        print(f"Downloading {fname} ...")
-
-        # Create a custom request containing a User-Agent header to prevent 403 Forbidden errors
-        req = urllib.request.Request(
-            url, 
-            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-        )
-
-        try:
-            # Open the URL and write out the chunks manually
-            with urllib.request.urlopen(req) as response, open(dest, 'wb') as out_file:
-                total_size = int(response.info().get('Content-Length', 0))
-                done = 0
-                block_size = 1024 * 64  # 64 KB chunks
-
-                while True:
-                    buffer = response.read(block_size)
-                    if not buffer:
-                        break
-                    done += len(buffer)
-                    out_file.write(buffer)
-                    
-                    if total_size > 0:
-                        pct = min(100, done * 100 // total_size)
-                        sys.stdout.write(f"\r  {fname}: {pct}% ({done // 1_000_000}MB / {total_size // 1_000_000}MB)")
-                        sys.stdout.flush()
-            print()
-        except Exception as e:
-            print(f"\nFailed to download {fname}: {e}")
-            print("Check your internet connection and try again. If this keeps failing, the")
-            print("dataset's hosting may have moved — check https://github.com/dcaribou/transfermarkt-datasets")
-            sys.exit(1)
-
-
-download_if_missing()
-
-print("Loading data into DuckDB (this takes a few seconds)...")
 con = duckdb.connect(database=":memory:")
-con.execute(f"CREATE TABLE players AS SELECT * FROM read_csv_auto('{DATA_DIR / 'players.csv.gz'}')")
-con.execute(f"CREATE TABLE valuations AS SELECT * FROM read_csv_auto('{DATA_DIR / 'player_valuations.csv.gz'}')")
-con.execute(f"CREATE TABLE transfers AS SELECT * FROM read_csv_auto('{DATA_DIR / 'transfers.csv.gz'}')")
-con.execute(f"CREATE TABLE clubs AS SELECT * FROM read_csv_auto('{DATA_DIR / 'clubs.csv.gz'}')")
+
+trimmed_files_present = all((TRIMMED_DIR / f"{f}.parquet").exists() for f in FILES)
+
+if trimmed_files_present:
+    print(f"Loading trimmed dataset from {TRIMMED_DIR}/ (no download needed)...")
+    for fname in FILES:
+        table = TABLE_NAMES[fname]
+        con.execute(f"CREATE TABLE {table} AS SELECT * FROM read_parquet('{TRIMMED_DIR / (fname + '.parquet')}')")
+else:
+    import sys
+    import urllib.request
+
+    print("No trimmed dataset found — falling back to full download mode.")
+    print("(Run trimmer.py after this finishes to build a small, deployable dataset.)")
+    FULL_DIR.mkdir(exist_ok=True)
+    BASE_URL = "https://pub-e682421888d945d684bcae8890b0ec20.r2.dev/data/"
+
+    def download_if_missing():
+        for fname in FILES:
+            dest = FULL_DIR / f"{fname}.csv.gz"
+            if dest.exists() and dest.stat().st_size > 0:
+                continue
+            url = BASE_URL + dest.name
+            print(f"Downloading {dest.name} ...")
+
+            def _progress(block_num, block_size, total_size):
+                if total_size <= 0:
+                    return
+                done = block_num * block_size
+                pct = min(100, done * 100 // total_size)
+                sys.stdout.write(f"\r  {dest.name}: {pct}% ({done // 1_000_000}MB / {total_size // 1_000_000}MB)")
+                sys.stdout.flush()
+
+            try:
+                urllib.request.urlretrieve(url, dest, _progress)
+                print()
+            except Exception as e:
+                print(f"\nFailed to download {dest.name}: {e}")
+                print("Check your internet connection and try again. If this keeps failing, the")
+                print("dataset's hosting may have moved — check https://github.com/dcaribou/transfermarkt-datasets")
+                sys.exit(1)
+
+    download_if_missing()
+    print("Loading data into DuckDB (this takes a few seconds)...")
+    for fname in FILES:
+        table = TABLE_NAMES[fname]
+        con.execute(f"CREATE TABLE {table} AS SELECT * FROM read_csv_auto('{FULL_DIR / (fname + '.csv.gz')}')")
+
 player_count = con.execute("SELECT COUNT(*) FROM players").fetchone()[0]
 print(f"Loaded {player_count:,} players. Starting server...")
 
@@ -212,6 +219,66 @@ def player_transfers(player_id):
         "date": str(r[0]), "season": r[1], "from_club": r[2], "to_club": r[3],
         "fee": r[4], "value_at_time": r[5]
     } for r in rows])
+
+
+@app.route("/api/ask", methods=["POST"])
+def ask_ai():
+    """Free-text Q&A over the top 1000 most valuable players, via Groq (free tier)."""
+    body = request.get_json(force=True, silent=True) or {}
+    question = (body.get("question") or "").strip()
+    if not question:
+        return jsonify({"error": "question is required"}), 400
+    if not GROQ_API_KEY:
+        return jsonify({
+            "error": "AI isn't configured on the server yet — set the GROQ_API_KEY environment variable "
+                     "(get a free key at console.groq.com/keys) and redeploy."
+        }), 503
+
+    rows = con.execute("""
+        SELECT name, position, current_club_name, country_of_citizenship,
+               market_value_in_eur, date_of_birth
+        FROM players
+        WHERE market_value_in_eur IS NOT NULL
+        ORDER BY market_value_in_eur DESC
+        LIMIT 1000
+    """).fetchall()
+
+    today = date.today()
+    lines = []
+    for name, pos, club, nat, val, dob in rows:
+        age = "-"
+        if dob:
+            age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+        lines.append(f"{name} | {pos or '-'} | {club or '-'} | {nat or '-'} | age {age} | €{(val or 0)/1_000_000:.0f}m")
+    dataset_text = "\n".join(lines)
+
+    system_prompt = (
+        "You are a football transfer market analyst. Answer the question using ONLY the dataset below "
+        "(the current top 1000 most valuable players, one per line: name | position | club | nationality | "
+        "age | market value). Be precise and concise, show your counting when relevant, and if the question "
+        "can't be answered from this data say so plainly.\n\nDATASET:\n" + dataset_text
+    )
+
+    try:
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": GROQ_MODEL,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": question},
+                ],
+                "max_tokens": 500,
+                "temperature": 0.2,
+            },
+            timeout=25,
+        )
+        resp.raise_for_status()
+        answer = resp.json()["choices"][0]["message"]["content"].strip()
+        return jsonify({"answer": answer})
+    except requests.exceptions.RequestException as e:
+        return jsonify({"error": f"Could not reach the AI service: {e}"}), 502
 
 
 @app.route("/api/club/<int:club_id>")
