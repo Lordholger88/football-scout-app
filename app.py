@@ -48,7 +48,6 @@ else:
     import urllib.request
 
     print("No trimmed dataset found — falling back to full download mode.")
-    print("(Run trimmer.py after this finishes to build a small, deployable dataset.)")
     try:
         FULL_DIR.mkdir(exist_ok=True)
     except OSError:
@@ -76,16 +75,33 @@ else:
                 urllib.request.urlretrieve(url, dest, _progress)
                 print()
             except Exception as e:
-                print(f"\nFailed to download {dest.name}: {e}")
-                print("Check your internet connection and try again. If this keeps failing, the")
-                print("dataset's hosting may have moved — check https://github.com/dcaribou/transfermarkt-datasets")
-                sys.exit(1)
+                raise Exception(f"Failed to download {dest.name}: {e}")
 
-    download_if_missing()
-    print("Loading data into DuckDB (this takes a few seconds)...")
-    for fname in FILES:
-        table = TABLE_NAMES[fname]
-        con.execute(f"CREATE TABLE {table} AS SELECT * FROM read_csv_auto('{FULL_DIR / (fname + '.csv.gz')}')")
+    try:
+        download_if_missing()
+        print("Loading data into DuckDB (this takes a few seconds)...")
+        for fname in FILES:
+            table = TABLE_NAMES[fname]
+            con.execute(f"CREATE TABLE {table} AS SELECT * FROM read_csv_auto('{FULL_DIR / (fname + '.csv.gz')}')")
+    except Exception as e:
+        print(f"\nData load failed: {e}")
+        print("Creating dummy tables to prevent Vercel from crashing...")
+        con.execute("""
+            CREATE TABLE players (
+                player_id BIGINT, name VARCHAR, current_club_name VARCHAR, country_of_citizenship VARCHAR,
+                position VARCHAR, sub_position VARCHAR, market_value_in_eur DOUBLE, highest_market_value_in_eur DOUBLE,
+                date_of_birth DATE, image_url VARCHAR, first_name VARCHAR, last_name VARCHAR, country_of_birth VARCHAR,
+                city_of_birth VARCHAR, foot VARCHAR, height_in_cm DOUBLE, agent_name VARCHAR, contract_expiration_date DATE,
+                url VARCHAR
+            )
+        """)
+        con.execute("CREATE TABLE valuations (player_id BIGINT, date DATE, market_value_in_eur DOUBLE)")
+        con.execute("CREATE TABLE transfers (player_id BIGINT, transfer_date DATE, transfer_season VARCHAR, from_club_name VARCHAR, to_club_name VARCHAR, transfer_fee DOUBLE, market_value_in_eur DOUBLE)")
+        con.execute("CREATE TABLE clubs (club_id BIGINT, name VARCHAR)")
+        
+        # Insert a warning row so the frontend doesn't break and shows the error directly
+        con.execute("INSERT INTO players (player_id, name, market_value_in_eur, position, current_club_name) VALUES (0, 'ERROR: data_trimmed folder missing from Vercel deployment', 999000000, 'Missing Data', 'Check GitHub Repo')")
+
 
 player_count = con.execute("SELECT COUNT(*) FROM players").fetchone()[0]
 print(f"Loaded {player_count:,} players. Starting server...")
@@ -266,13 +282,14 @@ def ask_ai():
         GROUP BY 1 ORDER BY c DESC LIMIT 20
     """).fetchall()
 
-    top10_sum, = con.execute("""
+    top10_sum_row = con.execute("""
         SELECT SUM(market_value_in_eur) FROM (
             SELECT market_value_in_eur FROM players
             WHERE market_value_in_eur IS NOT NULL
             ORDER BY market_value_in_eur DESC LIMIT 10
         )
     """).fetchone()
+    top10_sum = top10_sum_row[0] if top10_sum_row else 0
 
     over_100m_count, over_100m_avg_age = con.execute("""
         SELECT COUNT(*), AVG(DATE_DIFF('year', date_of_birth, CURRENT_DATE))
@@ -299,7 +316,7 @@ def ask_ai():
     parts = [
         f"TOTAL PLAYERS WITH A MARKET VALUE: {valued_total}",
         f"TOP 10 COMBINED MARKET VALUE: €{(top10_sum or 0)/1_000_000:.0f}m",
-        f"PLAYERS VALUED AT €100M OR MORE: count={over_100m_count}, average age={over_100m_avg_age:.1f}" if over_100m_count else "PLAYERS VALUED AT €100M OR MORE: count=0",
+        f"PLAYERS VALUED AT €100M OR MORE: count={over_100m_count}, average age={over_100m_avg_age or 0:.1f}" if over_100m_count else "PLAYERS VALUED AT €100M OR MORE: count=0",
         "",
         "PLAYER COUNT BY NATIONALITY (top 40 nationalities among valued players):",
         ", ".join(f"{n}: {c}" for n, c in nat_counts),
