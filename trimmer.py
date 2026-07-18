@@ -60,6 +60,25 @@ def main():
     con.execute(f"CREATE TABLE transfers AS SELECT * FROM read_csv_auto('{transfers_src}')")
     con.execute(f"CREATE TABLE clubs AS SELECT * FROM read_csv_auto('{clubs_src}')")
 
+    # IMPORTANT: each CSV above gets its column types independently inferred by DuckDB.
+    # If e.g. players.player_id comes out as BIGINT but valuations.player_id comes out as
+    # VARCHAR (easy to happen with auto-inference across separate files), every JOIN below
+    # silently returns zero matching rows — no error, just an empty result. That produces
+    # exactly "no graph, no transfer history" with no clue why. Force them all to the same
+    # type up front so the joins are guaranteed to work.
+    print("Normalizing id column types before joining (players/valuations/transfers/clubs)...")
+    id_columns = {
+        "players": ["player_id", "current_club_id"],
+        "valuations": ["player_id", "current_club_id"],
+        "transfers": ["player_id", "from_club_id", "to_club_id"],
+        "clubs": ["club_id"],
+    }
+    for table, cols in id_columns.items():
+        existing_cols = {r[0] for r in con.execute(f"DESCRIBE {table}").fetchall()}
+        for col in cols:
+            if col in existing_cols:
+                con.execute(f"ALTER TABLE {table} ALTER COLUMN {col} TYPE BIGINT USING TRY_CAST({col} AS BIGINT)")
+
     total = con.execute("SELECT COUNT(*) FROM players").fetchone()[0]
     print(f"Full dataset has {total:,} players. Trimming to top {args.top:,} by market value...\n")
 
@@ -81,6 +100,10 @@ def main():
     """)
     vcount = con.execute("SELECT COUNT(*) FROM top_valuations").fetchone()[0]
     print(f"  Value-history rows:  {vcount:,}  (full history per kept player — this is the graph data)")
+    if vcount < kept:
+        print("  ⚠️  WARNING: fewer value-history rows than kept players — something's off with the join")
+        print("      or the source data. Spot-check a known player_id in both players.csv.gz and")
+        print("      player_valuations.csv.gz to confirm the id values actually line up.")
 
     con.execute("""
         CREATE TABLE top_transfers AS
@@ -89,6 +112,10 @@ def main():
     """)
     tcount = con.execute("SELECT COUNT(*) FROM top_transfers").fetchone()[0]
     print(f"  Transfer records:    {tcount:,}")
+    if tcount == 0:
+        print("  ⚠️  WARNING: zero transfer records matched. Not necessarily a bug — some players")
+        print("      genuinely have no recorded transfers — but if this is 0 for the WHOLE top")
+        print("      10,000, that's a join problem worth double-checking.")
 
     con.execute("""
         CREATE TABLE relevant_club_ids AS
