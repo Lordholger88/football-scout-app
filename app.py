@@ -49,7 +49,11 @@ else:
 
     print("No trimmed dataset found — falling back to full download mode.")
     print("(Run trimmer.py after this finishes to build a small, deployable dataset.)")
-    FULL_DIR.mkdir(exist_ok=True)
+    try:
+        FULL_DIR.mkdir(exist_ok=True)
+    except OSError:
+        pass
+        
     BASE_URL = "https://pub-e682421888d945d684bcae8890b0ec20.r2.dev/data/"
 
     def download_if_missing():
@@ -77,7 +81,7 @@ else:
                 print("dataset's hosting may have moved — check https://github.com/dcaribou/transfermarkt-datasets")
                 sys.exit(1)
 
-    download_if_missing()
+        download_if_missing()
     print("Loading data into DuckDB (this takes a few seconds)...")
     for fname in FILES:
         table = TABLE_NAMES[fname]
@@ -242,7 +246,7 @@ def ask_ai():
         return jsonify({
             "error": "AI isn't configured on the server yet — set the GROQ_API_KEY environment variable "
                      "(get a free key at console.groq.com/keys) and redeploy."
-        }), 503
+        })
 
     TOP_N_LIST = 150          # small per-player list, for "who is..." style questions
     MAX_DATASET_CHARS = 9000  # hard cap on the built context, ~2200-2500 tokens — safety net
