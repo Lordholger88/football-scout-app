@@ -184,7 +184,7 @@ def player_detail(player_id):
                date_of_birth, position, sub_position, foot, height_in_cm,
                market_value_in_eur, highest_market_value_in_eur,
                agent_name, contract_expiration_date, image_url, url
-        FROM players WHERE player_id = ?
+        FROM players WHERE CAST(player_id AS BIGINT) = ?
     """, [player_id]).fetchone()
     if not row:
         return jsonify({"error": "not found"}), 404
@@ -200,7 +200,7 @@ def value_history(player_id):
     rows = con.execute("""
         SELECT date, market_value_in_eur
         FROM valuations
-        WHERE player_id = ?
+        WHERE CAST(player_id AS BIGINT) = ?
         ORDER BY date ASC
     """, [player_id]).fetchall()
     return jsonify([{"date": str(r[0]), "value": r[1]} for r in rows])
@@ -212,7 +212,7 @@ def player_transfers(player_id):
         SELECT transfer_date, transfer_season, from_club_name, to_club_name,
                transfer_fee, market_value_in_eur
         FROM transfers
-        WHERE player_id = ?
+        WHERE CAST(player_id AS BIGINT) = ?
         ORDER BY transfer_date DESC
     """, [player_id]).fetchall()
     return jsonify([{
@@ -223,7 +223,17 @@ def player_transfers(player_id):
 
 @app.route("/api/ask", methods=["POST"])
 def ask_ai():
-    """Free-text Q&A over the top 1000 most valuable players, via Groq (free tier)."""
+    """
+    Free-text Q&A over the player database, via Groq (free tier).
+
+    Instead of dumping hundreds/thousands of raw rows into the prompt (which is what
+    caused the 413 Payload Too Large — that was ~20k+ tokens of raw text on every
+    request), we precompute the aggregates that actually answer most questions
+    (counts by nationality/position/club, value totals, age stats) via SQL, and only
+    attach a short top-N list for "who specifically is #7" type lookups. This is both
+    smaller AND more accurate, since counting is done by SQL, not by the model eyeballing
+    a wall of text.
+    """
     body = request.get_json(force=True, silent=True) or {}
     question = (body.get("question") or "").strip()
     if not question:
@@ -234,29 +244,91 @@ def ask_ai():
                      "(get a free key at console.groq.com/keys) and redeploy."
         }), 503
 
-    rows = con.execute("""
+    TOP_N_LIST = 150          # small per-player list, for "who is..." style questions
+    MAX_DATASET_CHARS = 9000  # hard cap on the built context, ~2200-2500 tokens — safety net
+
+    valued_total = con.execute("SELECT COUNT(*) FROM players WHERE market_value_in_eur IS NOT NULL").fetchone()[0]
+
+    nat_counts = con.execute("""
+        SELECT country_of_citizenship, COUNT(*) c
+        FROM players
+        WHERE market_value_in_eur IS NOT NULL AND country_of_citizenship IS NOT NULL
+        GROUP BY 1 ORDER BY c DESC LIMIT 40
+    """).fetchall()
+
+    pos_counts = con.execute("""
+        SELECT position, COUNT(*) c
+        FROM players
+        WHERE market_value_in_eur IS NOT NULL AND position IS NOT NULL
+        GROUP BY 1 ORDER BY c DESC
+    """).fetchall()
+
+    club_counts = con.execute("""
+        SELECT current_club_name, COUNT(*) c
+        FROM players
+        WHERE market_value_in_eur IS NOT NULL AND current_club_name IS NOT NULL
+        GROUP BY 1 ORDER BY c DESC LIMIT 20
+    """).fetchall()
+
+    top10_sum, = con.execute("""
+        SELECT SUM(market_value_in_eur) FROM (
+            SELECT market_value_in_eur FROM players
+            WHERE market_value_in_eur IS NOT NULL
+            ORDER BY market_value_in_eur DESC LIMIT 10
+        )
+    """).fetchone()
+
+    over_100m_count, over_100m_avg_age = con.execute("""
+        SELECT COUNT(*), AVG(DATE_DIFF('year', date_of_birth, CURRENT_DATE))
+        FROM players
+        WHERE market_value_in_eur >= 100000000
+    """).fetchone()
+
+    top_rows = con.execute(f"""
         SELECT name, position, current_club_name, country_of_citizenship,
                market_value_in_eur, date_of_birth
         FROM players
         WHERE market_value_in_eur IS NOT NULL
         ORDER BY market_value_in_eur DESC
-        LIMIT 1000
+        LIMIT {TOP_N_LIST}
     """).fetchall()
 
     today = date.today()
-    lines = []
-    for name, pos, club, nat, val, dob in rows:
-        age = "-"
-        if dob:
-            age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
-        lines.append(f"{name} | {pos or '-'} | {club or '-'} | {nat or '-'} | age {age} | €{(val or 0)/1_000_000:.0f}m")
-    dataset_text = "\n".join(lines)
+
+    def fmt_age(dob):
+        if not dob:
+            return "-"
+        return today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+
+    parts = [
+        f"TOTAL PLAYERS WITH A MARKET VALUE: {valued_total}",
+        f"TOP 10 COMBINED MARKET VALUE: €{(top10_sum or 0)/1_000_000:.0f}m",
+        f"PLAYERS VALUED AT €100M OR MORE: count={over_100m_count}, average age={over_100m_avg_age:.1f}" if over_100m_count else "PLAYERS VALUED AT €100M OR MORE: count=0",
+        "",
+        "PLAYER COUNT BY NATIONALITY (top 40 nationalities among valued players):",
+        ", ".join(f"{n}: {c}" for n, c in nat_counts),
+        "",
+        "PLAYER COUNT BY POSITION (all valued players):",
+        ", ".join(f"{p}: {c}" for p, c in pos_counts),
+        "",
+        "PLAYER COUNT BY CURRENT CLUB (top 20 clubs by squad count among valued players):",
+        ", ".join(f"{cl}: {c}" for cl, c in club_counts),
+        "",
+        f"TOP {TOP_N_LIST} PLAYERS BY MARKET VALUE (name | position | club | nationality | age | value):",
+    ]
+    for name, pos, club, nat, val, dob in top_rows:
+        parts.append(f"{name} | {pos or '-'} | {club or '-'} | {nat or '-'} | age {fmt_age(dob)} | €{(val or 0)/1_000_000:.0f}m")
+
+    dataset_text = "\n".join(parts)
+    if len(dataset_text) > MAX_DATASET_CHARS:
+        dataset_text = dataset_text[:MAX_DATASET_CHARS] + "\n[...list truncated for size...]"
 
     system_prompt = (
-        "You are a football transfer market analyst. Answer the question using ONLY the dataset below "
-        "(the current top 1000 most valuable players, one per line: name | position | club | nationality | "
-        "age | market value). Be precise and concise, show your counting when relevant, and if the question "
-        "can't be answered from this data say so plainly.\n\nDATASET:\n" + dataset_text
+        "You are a football transfer market analyst. Answer the question using ONLY the data below. "
+        "The count/sum/average figures given are exact, precomputed values — trust them over any manual "
+        "counting. The per-player list only covers the very top of the market by value, so if a question "
+        "needs a player outside that list, say the data doesn't cover them rather than guessing. Be precise "
+        "and concise.\n\nDATA:\n" + dataset_text
     )
 
     try:
@@ -269,11 +341,13 @@ def ask_ai():
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": question},
                 ],
-                "max_tokens": 500,
+                "max_tokens": 400,
                 "temperature": 0.2,
             },
             timeout=25,
         )
+        if resp.status_code == 413:
+            return jsonify({"error": "The AI request was too large even after trimming — try a shorter question, or this needs a smaller MAX_DATASET_CHARS in app.py."}), 502
         resp.raise_for_status()
         answer = resp.json()["choices"][0]["message"]["content"].strip()
         return jsonify({"answer": answer})
